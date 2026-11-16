@@ -1,0 +1,342 @@
+name: Build Aurora Launcher
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Write project files
+        run: |
+          mkdir -p aurora/app/src/main/java/com/krishin/aurora aurora/app/src/main/res/values
+          mkdir -p ~/.android
+          keytool -genkey -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          cat > aurora/settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "AuroraLauncher"
+          include(":app")
+          EOF
+          cat > aurora/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > aurora/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          cat > aurora/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          
+          android {
+              namespace = "com.krishin.aurora"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.krishin.aurora"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+                      signingConfig = signingConfigs.getByName("debug") // fine for sideloading on your own TV
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+          }
+          
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.tv:tv-material:1.0.0")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+          }
+          EOF
+          cat > aurora/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          
+              <uses-feature android:name="android.software.leanback" android:required="true" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+          
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+              </queries>
+          
+              <application
+                  android:label="Aurora"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:banner="@android:drawable/sym_def_app_icon"
+                  android:theme="@style/Theme.Aurora"
+                  android:hardwareAccelerated="true">
+          
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTask"
+                      android:stateNotNeeded="true"
+                      android:resumeWhilePausing="true"
+                      android:screenOrientation="landscape"
+                      android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|uiMode">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > aurora/app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.Aurora" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:windowNoTitle">true</item>
+              </style>
+          </resources>
+          EOF
+          cat > aurora/app/src/main/java/com/krishin/aurora/MainActivity.kt <<'EOF'
+          package com.krishin.aurora
+          
+          import android.app.Application
+          import android.content.*
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.Image
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.itemsIndexed
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.focus.FocusRequester
+          import androidx.compose.ui.focus.focusRequester
+          import androidx.compose.ui.focus.onFocusChanged
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.asImageBitmap
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.ContextCompat
+          import androidx.core.graphics.drawable.toBitmap
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import androidx.lifecycle.viewmodel.compose.viewModel
+          import androidx.tv.material3.*
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.flow.MutableStateFlow
+          import kotlinx.coroutines.flow.asStateFlow
+          import kotlinx.coroutines.launch
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          
+          class AppEntry(
+              val label: String,
+              val pkg: String,
+              val intent: Intent,
+              val banner: ImageBitmap?,
+              val icon: ImageBitmap,
+          )
+          
+          class AppsViewModel(app: Application) : AndroidViewModel(app) {
+              private val _apps = MutableStateFlow<List<AppEntry>>(emptyList())
+              val apps = _apps.asStateFlow()
+          
+              private val receiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) = load()
+              }
+          
+              init {
+                  val f = IntentFilter().apply {
+                      addAction(Intent.ACTION_PACKAGE_ADDED)
+                      addAction(Intent.ACTION_PACKAGE_REMOVED)
+                      addAction(Intent.ACTION_PACKAGE_REPLACED)
+                      addDataScheme("package")
+                  }
+                  ContextCompat.registerReceiver(app, receiver, f, ContextCompat.RECEIVER_EXPORTED)
+                  load()
+              }
+          
+              fun load() {
+                  viewModelScope.launch(Dispatchers.Default) { _apps.value = query() }
+              }
+          
+              private fun query(): List<AppEntry> {
+                  val ctx = getApplication<Application>()
+                  val pm = ctx.packageManager
+                  val tv = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
+                  val std = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  return (pm.queryIntentActivities(tv, 0) + pm.queryIntentActivities(std, 0))
+                      .distinctBy { it.activityInfo.packageName }          // TV apps win over phone entries
+                      .filter { it.activityInfo.packageName != ctx.packageName }
+                      .mapNotNull { ri ->
+                          val pkg = ri.activityInfo.packageName
+                          val intent = pm.getLeanbackLaunchIntentForPackage(pkg)
+                              ?: pm.getLaunchIntentForPackage(pkg) ?: return@mapNotNull null
+                          val banner = (ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm))
+                              ?.toBitmap(320, 180)?.asImageBitmap()
+                          AppEntry(
+                              label = ri.loadLabel(pm).toString(),
+                              pkg = pkg,
+                              intent = intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                              banner = banner,
+                              icon = ri.loadIcon(pm).toBitmap(192, 192).asImageBitmap(),
+                          )
+                      }
+              }
+          
+              override fun onCleared() {
+                  getApplication<Application>().unregisterReceiver(receiver)
+              }
+          }
+          
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      val vm: AppsViewModel = viewModel()
+                      val apps by vm.apps.collectAsState()
+                      BackHandler {} // a launcher never "backs out"
+                      Home(apps) { runCatching { startActivity(it.intent) } }
+                  }
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun Home(apps: List<AppEntry>, onLaunch: (AppEntry) -> Unit) {
+              var focused by remember { mutableStateOf<AppEntry?>(null) }
+              val firstFocus = remember { FocusRequester() }
+              LaunchedEffect(apps.isNotEmpty()) {
+                  if (apps.isNotEmpty()) runCatching { firstFocus.requestFocus() }
+              }
+          
+              Box(
+                  Modifier.fillMaxSize().background(
+                      Brush.verticalGradient(listOf(Color(0xFF22345C), Color(0xFF0C1220), Color.Black))
+                  )
+              ) {
+                  Clock(Modifier.align(Alignment.TopEnd).padding(horizontal = 64.dp, vertical = 40.dp))
+          
+                  Column(Modifier.align(Alignment.BottomStart).padding(bottom = 80.dp)) {
+                      Text(
+                          text = focused?.label ?: "",
+                          color = Color.White,
+                          fontSize = 36.sp,
+                          fontWeight = FontWeight.SemiBold,
+                          modifier = Modifier.padding(start = 64.dp, bottom = 28.dp),
+                      )
+                      LazyRow(
+                          contentPadding = PaddingValues(horizontal = 64.dp, vertical = 24.dp),
+                          horizontalArrangement = Arrangement.spacedBy(28.dp),
+                      ) {
+                          itemsIndexed(apps, key = { _, a -> a.pkg }) { i, app ->
+                              AppTile(
+                                  app = app,
+                                  modifier = if (i == 0) Modifier.focusRequester(firstFocus) else Modifier,
+                                  onFocus = { focused = app },
+                                  onClick = { onLaunch(app) },
+                              )
+                          }
+                      }
+                  }
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun AppTile(app: AppEntry, modifier: Modifier, onFocus: () -> Unit, onClick: () -> Unit) {
+              val shape = RoundedCornerShape(18.dp)
+              Surface(
+                  onClick = onClick,
+                  modifier = modifier
+                      .width(250.dp)
+                      .aspectRatio(16f / 9f)
+                      .onFocusChanged { if (it.isFocused) onFocus() },
+                  shape = ClickableSurfaceDefaults.shape(shape),
+                  scale = ClickableSurfaceDefaults.scale(focusedScale = 1.14f),
+                  glow = ClickableSurfaceDefaults.glow(
+                      focusedGlow = Glow(elevationColor = Color.White.copy(alpha = 0.35f), elevation = 24.dp)
+                  ),
+                  colors = ClickableSurfaceDefaults.colors(
+                      containerColor = Color(0x26FFFFFF),
+                      focusedContainerColor = Color(0x40FFFFFF),
+                  ),
+              ) {
+                  if (app.banner != null) {
+                      Image(app.banner, null, Modifier.fillMaxSize().clip(shape), contentScale = ContentScale.Crop)
+                  } else {
+                      Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                          Image(app.icon, null, Modifier.size(96.dp))
+                      }
+                  }
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun Clock(modifier: Modifier) {
+              var t by remember { mutableStateOf(now()) }
+              LaunchedEffect(Unit) { while (true) { t = now(); delay(10_000) } }
+              Text(t, modifier, color = Color.White.copy(alpha = 0.9f), fontSize = 28.sp, fontWeight = FontWeight.Medium)
+          }
+          
+          private fun now(): String = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+          EOF
+      - name: Build release APK
+        working-directory: aurora
+        run: gradle assembleRelease --no-daemon
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Aurora Launcher (latest)
+          files: aurora/app/build/outputs/apk/release/app-release.apk
+          
