@@ -52,7 +52,8 @@ jobs:
                   minSdk = 26
                   targetSdk = 34
                   versionCode = 1
-                  versionName = "1.0"
+                  versionName = "2.0"
+                  buildConfigField("String", "TMDB_KEY", "\"${project.findProperty("TMDB_KEY") ?: ""}\"")
               }
               buildTypes {
                   release {
@@ -67,7 +68,10 @@ jobs:
                   targetCompatibility = JavaVersion.VERSION_17
               }
               kotlinOptions { jvmTarget = "17" }
-              buildFeatures { compose = true }
+              buildFeatures {
+                  compose = true
+                  buildConfig = true
+              }
               composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
           }
           
@@ -75,7 +79,9 @@ jobs:
               implementation(platform("androidx.compose:compose-bom:2024.09.00"))
               implementation("androidx.compose.ui:ui")
               implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.animation:animation")
               implementation("androidx.tv:tv-material:1.0.0")
+              implementation("io.coil-kt:coil-compose:2.7.0")
               implementation("androidx.activity:activity-compose:1.9.2")
               implementation("androidx.core:core-ktx:1.13.1")
               implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
@@ -84,6 +90,8 @@ jobs:
           cat > aurora/app/src/main/AndroidManifest.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          
+              <uses-permission android:name="android.permission.INTERNET" />
           
               <uses-feature android:name="android.software.leanback" android:required="true" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
@@ -137,45 +145,71 @@ jobs:
           
           import android.app.Application
           import android.content.*
+          import android.os.Build
           import android.os.Bundle
+          import android.widget.Toast
           import androidx.activity.ComponentActivity
           import androidx.activity.compose.BackHandler
           import androidx.activity.compose.setContent
+          import androidx.compose.animation.Crossfade
+          import androidx.compose.animation.core.tween
           import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
+          import androidx.compose.foundation.border
           import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
           import androidx.compose.foundation.lazy.LazyRow
+          import androidx.compose.foundation.lazy.items
           import androidx.compose.foundation.lazy.itemsIndexed
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.BlurredEdgeTreatment
+          import androidx.compose.ui.draw.blur
           import androidx.compose.ui.draw.clip
           import androidx.compose.ui.focus.FocusRequester
           import androidx.compose.ui.focus.focusRequester
           import androidx.compose.ui.focus.onFocusChanged
+          import androidx.compose.ui.geometry.Offset
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.Shape
           import androidx.compose.ui.graphics.asImageBitmap
           import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.layout.onGloballyPositioned
+          import androidx.compose.ui.layout.positionInRoot
+          import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.IntOffset
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import androidx.core.content.ContextCompat
           import androidx.core.graphics.drawable.toBitmap
+          import androidx.core.net.toUri
           import androidx.lifecycle.AndroidViewModel
           import androidx.lifecycle.viewModelScope
           import androidx.lifecycle.viewmodel.compose.viewModel
           import androidx.tv.material3.*
+          import coil.compose.AsyncImage
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
           import kotlinx.coroutines.flow.MutableStateFlow
           import kotlinx.coroutines.flow.asStateFlow
           import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
           import java.text.SimpleDateFormat
           import java.util.Date
           import java.util.Locale
+          import kotlin.math.roundToInt
+          
+          // ───────────────────────── data ─────────────────────────
           
           class AppEntry(
               val label: String,
@@ -185,13 +219,71 @@ jobs:
               val icon: ImageBitmap,
           )
           
+          data class Title(
+              val id: Int, val name: String, val overview: String, val year: String,
+              val rating: Double, val backdrop: String, val isTv: Boolean,
+          )
+          
+          data class Shelf(val title: String, val items: List<Title>)
+          
+          object Tmdb {
+              private const val BASE = "https://api.themoviedb.org/3"
+              const val IMG = "https://image.tmdb.org/t/p/"
+          
+              fun get(path: String): String? = runCatching {
+                  val sep = if (path.contains("?")) "&" else "?"
+                  val c = URL("$BASE$path${sep}api_key=${BuildConfig.TMDB_KEY}&language=en-US")
+                      .openConnection() as HttpURLConnection
+                  c.connectTimeout = 8000; c.readTimeout = 8000
+                  c.inputStream.bufferedReader().use { it.readText() }
+              }.getOrNull()
+          
+              fun parse(json: String, forceTv: Boolean?): List<Title> {
+                  val arr = JSONObject(json).getJSONArray("results")
+                  return (0 until arr.length()).mapNotNull { i ->
+                      val o = arr.getJSONObject(i)
+                      val type = o.optString("media_type")
+                      if (type == "person") return@mapNotNull null
+                      val bd = o.optString("backdrop_path")
+                      if (bd.isEmpty() || bd == "null") return@mapNotNull null
+                      val tv = forceTv ?: (type == "tv")
+                      Title(
+                          id = o.getInt("id"),
+                          name = o.optString(if (tv) "name" else "title"),
+                          overview = o.optString("overview"),
+                          year = o.optString(if (tv) "first_air_date" else "release_date").take(4),
+                          rating = o.optDouble("vote_average", 0.0),
+                          backdrop = bd,
+                          isTv = tv,
+                      )
+                  }
+              }
+          
+              fun imdbId(t: Title): String? =
+                  get("/${if (t.isTv) "tv" else "movie"}/${t.id}/external_ids")?.let {
+                      JSONObject(it).optString("imdb_id").takeIf { s -> s.startsWith("tt") }
+                  }
+          }
+          
+          // ───────────────────────── view model ─────────────────────────
+          
           class AppsViewModel(app: Application) : AndroidViewModel(app) {
               private val _apps = MutableStateFlow<List<AppEntry>>(emptyList())
               val apps = _apps.asStateFlow()
+              private val _shelves = MutableStateFlow<List<Shelf>>(emptyList())
+              val shelves = _shelves.asStateFlow()
           
               private val receiver = object : BroadcastReceiver() {
-                  override fun onReceive(c: Context, i: Intent) = load()
+                  override fun onReceive(c: Context, i: Intent) = loadApps()
               }
+          
+              private val defs = listOf(
+                  Triple("Trending Today", "/trending/all/day", null as Boolean?),
+                  Triple("Popular Movies", "/movie/popular", false),
+                  Triple("Top Rated Movies", "/movie/top_rated", false),
+                  Triple("Popular Series", "/tv/popular", true),
+                  Triple("Now Playing", "/movie/now_playing", false),
+              )
           
               init {
                   val f = IntentFilter().apply {
@@ -201,20 +293,39 @@ jobs:
                       addDataScheme("package")
                   }
                   ContextCompat.registerReceiver(app, receiver, f, ContextCompat.RECEIVER_EXPORTED)
-                  load()
+                  loadApps()
+                  loadShelves()
               }
           
-              fun load() {
-                  viewModelScope.launch(Dispatchers.Default) { _apps.value = query() }
+              fun loadApps() {
+                  viewModelScope.launch(Dispatchers.Default) { _apps.value = queryApps() }
               }
           
-              private fun query(): List<AppEntry> {
+              private fun loadShelves() {
+                  if (BuildConfig.TMDB_KEY.isBlank()) return
+                  viewModelScope.launch(Dispatchers.IO) {
+                      val prefs = getApplication<Application>().getSharedPreferences("tmdb", Context.MODE_PRIVATE)
+                      fun build() = defs.mapNotNull { (title, path, tv) ->
+                          prefs.getString(path, null)
+                              ?.let { runCatching { Shelf(title, Tmdb.parse(it, tv)) }.getOrNull() }
+                              ?.takeIf { it.items.isNotEmpty() }
+                      }
+                      _shelves.value = build()                       // instant from cache
+                      defs.forEach { (_, path, _) ->                 // then refresh
+                          Tmdb.get(path)?.let { prefs.edit().putString(path, it).apply() }
+                          _shelves.value = build()
+                      }
+                  }
+              }
+          
+              private fun queryApps(): List<AppEntry> {
                   val ctx = getApplication<Application>()
                   val pm = ctx.packageManager
                   val tv = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER)
                   val std = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val priority = listOf("stremio", "nuvio")
                   return (pm.queryIntentActivities(tv, 0) + pm.queryIntentActivities(std, 0))
-                      .distinctBy { it.activityInfo.packageName }          // TV apps win over phone entries
+                      .distinctBy { it.activityInfo.packageName }
                       .filter { it.activityInfo.packageName != ctx.packageName }
                       .mapNotNull { ri ->
                           val pkg = ri.activityInfo.packageName
@@ -223,13 +334,12 @@ jobs:
                           val banner = (ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm))
                               ?.toBitmap(320, 180)?.asImageBitmap()
                           AppEntry(
-                              label = ri.loadLabel(pm).toString(),
-                              pkg = pkg,
-                              intent = intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                              banner = banner,
-                              icon = ri.loadIcon(pm).toBitmap(192, 192).asImageBitmap(),
+                              ri.loadLabel(pm).toString(), pkg,
+                              intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                              banner, ri.loadIcon(pm).toBitmap(192, 192).asImageBitmap(),
                           )
                       }
+                      .sortedBy { a -> priority.indexOfFirst { a.label.contains(it, true) }.let { if (it < 0) 99 else it } }
               }
           
               override fun onCleared() {
@@ -237,106 +347,64 @@ jobs:
               }
           }
           
+          // ───────────────────────── activity ─────────────────────────
+          
           class MainActivity : ComponentActivity() {
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   setContent {
                       val vm: AppsViewModel = viewModel()
                       val apps by vm.apps.collectAsState()
-                      BackHandler {} // a launcher never "backs out"
-                      Home(apps) { runCatching { startActivity(it.intent) } }
+                      val shelves by vm.shelves.collectAsState()
+                      val ctx = LocalContext.current
+                      val scope = rememberCoroutineScope()
+                      BackHandler {}
+                      Home(
+                          apps, shelves,
+                          onApp = { runCatching { startActivity(it.intent) } },
+                          onTitle = { t ->
+                              scope.launch {
+                                  val imdb = withContext(Dispatchers.IO) { Tmdb.imdbId(t) }
+                                  val uri = when {
+                                      imdb == null -> null
+                                      t.isTv -> "stremio:///detail/series/$imdb"
+                                      else -> "stremio:///detail/movie/$imdb/$imdb"
+                                  }
+                                  val ok = uri != null && runCatching {
+                                      ctx.startActivity(Intent(Intent.ACTION_VIEW, uri.toUri()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                  }.isSuccess
+                                  if (!ok) Toast.makeText(ctx, "Couldn't open Stremio for ${t.name}", Toast.LENGTH_LONG).show()
+                              }
+                          },
+                      )
                   }
               }
           }
           
+          // ───────────────────────── UI ─────────────────────────
+          
           @OptIn(ExperimentalTvMaterial3Api::class)
           @Composable
-          fun Home(apps: List<AppEntry>, onLaunch: (AppEntry) -> Unit) {
-              var focused by remember { mutableStateOf<AppEntry?>(null) }
+          fun Home(apps: List<AppEntry>, shelves: List<Shelf>, onApp: (AppEntry) -> Unit, onTitle: (Title) -> Unit) {
+              val trending = shelves.firstOrNull()?.items.orEmpty()
+              var hero by remember { mutableStateOf<Title?>(null) }
+              var rotating by remember { mutableStateOf(true) }
               val firstFocus = remember { FocusRequester() }
+          
+              LaunchedEffect(trending.size, rotating) {
+                  if (trending.isEmpty()) return@LaunchedEffect
+                  if (hero == null) hero = trending[0]
+                  if (rotating) {
+                      var i = trending.indexOf(hero).coerceAtLeast(0)
+                      while (true) { delay(9000); i = (i + 1) % trending.size; hero = trending[i] }
+                  }
+              }
               LaunchedEffect(apps.isNotEmpty()) {
                   if (apps.isNotEmpty()) runCatching { firstFocus.requestFocus() }
               }
           
-              Box(
-                  Modifier.fillMaxSize().background(
-                      Brush.verticalGradient(listOf(Color(0xFF22345C), Color(0xFF0C1220), Color.Black))
-                  )
-              ) {
-                  Clock(Modifier.align(Alignment.TopEnd).padding(horizontal = 64.dp, vertical = 40.dp))
+              val heroUrl = hero?.let { Tmdb.IMG + "w1280" + it.backdrop }
           
-                  Column(Modifier.align(Alignment.BottomStart).padding(bottom = 80.dp)) {
-                      Text(
-                          text = focused?.label ?: "",
-                          color = Color.White,
-                          fontSize = 36.sp,
-                          fontWeight = FontWeight.SemiBold,
-                          modifier = Modifier.padding(start = 64.dp, bottom = 28.dp),
-                      )
-                      LazyRow(
-                          contentPadding = PaddingValues(horizontal = 64.dp, vertical = 24.dp),
-                          horizontalArrangement = Arrangement.spacedBy(28.dp),
-                      ) {
-                          itemsIndexed(apps, key = { _, a -> a.pkg }) { i, app ->
-                              AppTile(
-                                  app = app,
-                                  modifier = if (i == 0) Modifier.focusRequester(firstFocus) else Modifier,
-                                  onFocus = { focused = app },
-                                  onClick = { onLaunch(app) },
-                              )
-                          }
-                      }
-                  }
-              }
-          }
-          
-          @OptIn(ExperimentalTvMaterial3Api::class)
-          @Composable
-          fun AppTile(app: AppEntry, modifier: Modifier, onFocus: () -> Unit, onClick: () -> Unit) {
-              val shape = RoundedCornerShape(18.dp)
-              Surface(
-                  onClick = onClick,
-                  modifier = modifier
-                      .width(250.dp)
-                      .aspectRatio(16f / 9f)
-                      .onFocusChanged { if (it.isFocused) onFocus() },
-                  shape = ClickableSurfaceDefaults.shape(shape),
-                  scale = ClickableSurfaceDefaults.scale(focusedScale = 1.14f),
-                  glow = ClickableSurfaceDefaults.glow(
-                      focusedGlow = Glow(elevationColor = Color.White.copy(alpha = 0.35f), elevation = 24.dp)
-                  ),
-                  colors = ClickableSurfaceDefaults.colors(
-                      containerColor = Color(0x26FFFFFF),
-                      focusedContainerColor = Color(0x40FFFFFF),
-                  ),
-              ) {
-                  if (app.banner != null) {
-                      Image(app.banner, null, Modifier.fillMaxSize().clip(shape), contentScale = ContentScale.Crop)
-                  } else {
-                      Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                          Image(app.icon, null, Modifier.size(96.dp))
-                      }
-                  }
-              }
-          }
-          
-          @OptIn(ExperimentalTvMaterial3Api::class)
-          @Composable
-          fun Clock(modifier: Modifier) {
-              var t by remember { mutableStateOf(now()) }
-              LaunchedEffect(Unit) { while (true) { t = now(); delay(10_000) } }
-              Text(t, modifier, color = Color.White.copy(alpha = 0.9f), fontSize = 28.sp, fontWeight = FontWeight.Medium)
-          }
-          
-          private fun now(): String = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
-          EOF
-      - name: Build release APK
-        working-directory: aurora
-        run: gradle assembleRelease --no-daemon
-      - name: Publish APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: Aurora Launcher (latest)
-          files: aurora/app/build/outputs/apk/release/app-release.apk
-          
+              Box(Modifier.fillMaxSize().background(Color(0xFF05070D))) {
+                  Crossfade(heroUrl, animationSpec = tween(800), label = "hero") { url ->
+                      if (url != null) AsyncImage(url, null, Modifier.fillMaxSize(), contentScale = Content
