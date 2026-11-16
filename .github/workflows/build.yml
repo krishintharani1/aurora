@@ -407,4 +407,161 @@ jobs:
           
               Box(Modifier.fillMaxSize().background(Color(0xFF05070D))) {
                   Crossfade(heroUrl, animationSpec = tween(800), label = "hero") { url ->
-                      if (url != null) AsyncImage(url, null, Modifier.fillMaxSize(), contentScale = Content
+                      if (url != null) AsyncImage(url, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                  }
+                  Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xE6000000), Color(0x66000000), Color.Transparent))))
+                  Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0.35f to Color.Transparent, 0.75f to Color(0xB3000000), 1f to Color(0xF2000000))))
+          
+                  Clock(Modifier.align(Alignment.TopEnd).padding(horizontal = 64.dp, vertical = 36.dp))
+          
+                  Column(Modifier.fillMaxSize()) {
+                      HeroInfo(hero, BuildConfig.TMDB_KEY.isBlank(), Modifier.weight(0.42f).fillMaxWidth())
+                      LazyColumn(Modifier.weight(0.58f), contentPadding = PaddingValues(bottom = 48.dp)) {
+                          item {
+                              Glass(Modifier.padding(horizontal = 48.dp).fillMaxWidth(), RoundedCornerShape(30.dp), heroUrl) {
+                                  LazyRow(
+                                      contentPadding = PaddingValues(horizontal = 28.dp, vertical = 22.dp),
+                                      horizontalArrangement = Arrangement.spacedBy(22.dp),
+                                  ) {
+                                      itemsIndexed(apps, key = { _, a -> a.pkg }) { i, app ->
+                                          AppTile(
+                                              app,
+                                              if (i == 0) Modifier.focusRequester(firstFocus) else Modifier,
+                                              onFocus = { rotating = true },
+                                              onClick = { onApp(app) },
+                                          )
+                                      }
+                                  }
+                              }
+                          }
+                          items(shelves, key = { it.title }) { shelf ->
+                              Text(shelf.title, Modifier.padding(start = 64.dp, top = 28.dp, bottom = 4.dp),
+                                  color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                              LazyRow(
+                                  contentPadding = PaddingValues(horizontal = 64.dp, vertical = 16.dp),
+                                  horizontalArrangement = Arrangement.spacedBy(20.dp),
+                              ) {
+                                  items(shelf.items, key = { "${it.isTv}-${it.id}" }) { t ->
+                                      TitleCard(t, onFocus = { hero = t; rotating = false }, onClick = { onTitle(t) })
+                                  }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun HeroInfo(t: Title?, noKey: Boolean, modifier: Modifier) {
+              Column(modifier.padding(start = 64.dp, top = 52.dp, end = 64.dp), verticalArrangement = Arrangement.Bottom) {
+                  if (t == null) {
+                      Text("Aurora", color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Bold)
+                      if (noKey) Text("Add your TMDB key to show movies here", color = Color.White.copy(.7f), fontSize = 18.sp)
+                      return@Column
+                  }
+                  Text(t.name, color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  Text(
+                      listOf(if (t.isTv) "Series" else "Movie", t.year, "★ " + "%.1f".format(t.rating)).filter { it.isNotBlank() }.joinToString("   •   "),
+                      Modifier.padding(top = 6.dp), color = Color.White.copy(.8f), fontSize = 18.sp,
+                  )
+                  Text(t.overview, Modifier.padding(top = 10.dp, bottom = 12.dp).fillMaxWidth(0.5f),
+                      color = Color.White.copy(.85f), fontSize = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+              }
+          }
+          
+          /** Frosted-glass panel. On Android 12+ it blurs a copy of the backdrop behind it; older TVs get a frosted gradient. */
+          @Composable
+          fun Glass(modifier: Modifier, shape: Shape, bgUrl: String?, content: @Composable () -> Unit) {
+              var pos by remember { mutableStateOf(Offset.Zero) }
+              val cfg = LocalConfiguration.current
+              Box(modifier.clip(shape).onGloballyPositioned { pos = it.positionInRoot() }) {
+                  if (Build.VERSION.SDK_INT >= 31 && bgUrl != null) {
+                      Box(Modifier.matchParentSize()) {
+                          AsyncImage(
+                              bgUrl, null,
+                              Modifier.requiredSize(cfg.screenWidthDp.dp, cfg.screenHeightDp.dp)
+                                  .offset { IntOffset(-pos.x.roundToInt(), -pos.y.roundToInt()) }
+                                  .blur(36.dp, BlurredEdgeTreatment.Unbounded),
+                              contentScale = ContentScale.Crop,
+                          )
+                      }
+                  }
+                  Box(
+                      Modifier.matchParentSize()
+                          .background(Brush.verticalGradient(listOf(Color.White.copy(.20f), Color.White.copy(.07f))))
+                          .border(1.dp, Brush.verticalGradient(listOf(Color.White.copy(.55f), Color.White.copy(.08f))), shape)
+                  )
+                  content()
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun AppTile(app: AppEntry, modifier: Modifier, onFocus: () -> Unit, onClick: () -> Unit) {
+              val shape = RoundedCornerShape(18.dp)
+              var focused by remember { mutableStateOf(false) }
+              Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                  Surface(
+                      onClick = onClick,
+                      modifier = modifier.width(190.dp).aspectRatio(16f / 9f)
+                          .onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocus() },
+                      shape = ClickableSurfaceDefaults.shape(shape),
+                      scale = ClickableSurfaceDefaults.scale(focusedScale = 1.12f),
+                      glow = ClickableSurfaceDefaults.glow(focusedGlow = Glow(Color.White.copy(.35f), 22.dp)),
+                      colors = ClickableSurfaceDefaults.colors(
+                          containerColor = Color(0x30FFFFFF), focusedContainerColor = Color(0x55FFFFFF)),
+                  ) {
+                      if (app.banner != null) {
+                          Image(app.banner, null, Modifier.fillMaxSize().clip(shape), contentScale = ContentScale.Crop)
+                      } else {
+                          Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Image(app.icon, null, Modifier.size(80.dp)) }
+                      }
+                  }
+                  Text(app.label, Modifier.padding(top = 12.dp), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                      color = Color.White.copy(if (focused) 1f else 0f), fontSize = 16.sp)
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun TitleCard(t: Title, onFocus: () -> Unit, onClick: () -> Unit) {
+              val shape = RoundedCornerShape(16.dp)
+              Surface(
+                  onClick = onClick,
+                  modifier = Modifier.width(270.dp).aspectRatio(16f / 9f).onFocusChanged { if (it.isFocused) onFocus() },
+                  shape = ClickableSurfaceDefaults.shape(shape),
+                  scale = ClickableSurfaceDefaults.scale(focusedScale = 1.1f),
+                  glow = ClickableSurfaceDefaults.glow(focusedGlow = Glow(Color.White.copy(.3f), 20.dp)),
+                  colors = ClickableSurfaceDefaults.colors(containerColor = Color(0x30FFFFFF), focusedContainerColor = Color(0x55FFFFFF)),
+              ) {
+                  Box(Modifier.fillMaxSize()) {
+                      AsyncImage(Tmdb.IMG + "w500" + t.backdrop, null, Modifier.fillMaxSize().clip(shape), contentScale = ContentScale.Crop)
+                      Box(Modifier.matchParentSize().background(Brush.verticalGradient(0.55f to Color.Transparent, 1f to Color(0xCC000000))))
+                      Text(t.name, Modifier.align(Alignment.BottomStart).padding(12.dp), color = Color.White,
+                          fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                  }
+              }
+          }
+          
+          @OptIn(ExperimentalTvMaterial3Api::class)
+          @Composable
+          fun Clock(modifier: Modifier) {
+              var t by remember { mutableStateOf(now()) }
+              LaunchedEffect(Unit) { while (true) { t = now(); delay(10_000) } }
+              Text(t, modifier, color = Color.White.copy(.92f), fontSize = 26.sp, fontWeight = FontWeight.Medium)
+          }
+          
+          private fun now(): String = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+          EOF
+      - name: Build release APK
+        working-directory: aurora
+        env:
+          TMDB_KEY: ${{ secrets.TMDB_KEY }}
+        run: gradle assembleRelease --no-daemon -PTMDB_KEY="$TMDB_KEY"
+      - name: Publish APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Aurora Launcher (latest)
+          files: aurora/app/build/outputs/apk/release/app-release.apk
